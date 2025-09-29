@@ -16,37 +16,40 @@ jobs:
       id-token: write
     env:
       AEMET_API_KEY: ${{ secrets.AEMET_API_KEY }}
-      METEOALARM_TOKEN: ${{ secrets.METEOALARM_TOKEN }}  # <-- NUEVO
+
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: "20" }
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # instala dependencias
       - run: npm install --no-audit --no-fund
 
+      # ejecuta scripts
       - run: node scripts/fetch_avisos.js
       - run: node scripts/fetch_obs.js
 
-      - run: mkdir -p dist && touch dist/.nojekyll && ls -l dist
-
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist
-      - uses: actions/deploy-pages@v4
-
-      - run: node scripts/fetch_avisos.js
-      - run: node scripts/fetch_obs.js
-
-      # DEBUG: Lista y enseña los ficheros que vamos a publicar
+      # DEBUG: mostrar qué se ha generado en dist/
       - run: |
           echo "=== DIST LISTING ==="
           ls -l dist
-          echo "=== HEAD obs_diag.json ==="
-          (test -f dist/obs_diag.json && head -n 50 dist/obs_diag.json) || echo "obs_diag.json NO EXISTE"
           echo "=== HEAD avisos_diag.json ==="
           (test -f dist/avisos_diag.json && head -n 50 dist/avisos_diag.json) || echo "avisos_diag.json NO EXISTE"
+          echo "=== HEAD obs_diag.json ==="
+          (test -f dist/obs_diag.json && head -n 50 dist/obs_diag.json) || echo "obs_diag.json NO EXISTE"
 
+      # necesario para que Pages publique también ficheros sin extensión .html
       - run: mkdir -p dist && touch dist/.nojekyll
+
+      # subir artefacto a GitHub Pages
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      # desplegar en Pages
+      - uses: actions/deploy-pages@v4
 
 
 
