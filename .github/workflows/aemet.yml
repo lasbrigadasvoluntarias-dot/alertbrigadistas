@@ -34,5 +34,19 @@ jobs:
           path: dist
       - uses: actions/deploy-pages@v4
 
+      - run: node scripts/fetch_avisos.js
+      - run: node scripts/fetch_obs.js
+
+      # DEBUG: Lista y enseña los ficheros que vamos a publicar
+      - run: |
+          echo "=== DIST LISTING ==="
+          ls -l dist
+          echo "=== HEAD obs_diag.json ==="
+          (test -f dist/obs_diag.json && head -n 50 dist/obs_diag.json) || echo "obs_diag.json NO EXISTE"
+          echo "=== HEAD avisos_diag.json ==="
+          (test -f dist/avisos_diag.json && head -n 50 dist/avisos_diag.json) || echo "avisos_diag.json NO EXISTE"
+
+      - run: mkdir -p dist && touch dist/.nojekyll
+
 
 
