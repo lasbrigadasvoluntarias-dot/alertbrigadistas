@@ -1,182 +1,184 @@
-// Node 20 (GitHub Actions)
-// deps: fast-xml-parser, undici
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
-import { XMLParser } from "fast-xml-parser";
-import { Agent } from "undici";
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Alertas y Estaciones</title>
 
-const agent = new Agent({ connect: { family: 4, timeout: 20000 } });
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  html, body { margin:0; padding:0; height:100%; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  #map { position:absolute; inset:0; background:#f6f6f6; touch-action: none; } /* mejora gesto táctil sobre Leaflet */
 
-// UA de navegador para evitar filtros
-const HEADERS_XML = {
-  "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
-  "Accept": "application/atom+xml, application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5"
-};
+  /* Controles flotantes: no capturan toques por defecto, salvo sus elementos interactivos */
+  .ui { position:absolute; z-index:900; pointer-events: none; }
+  .ui * { pointer-events: auto; }
 
-// Feeds directos y mirrors
-const FEEDS_BASE = [
-  "https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-atom-spain",
-  "https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-rss-spain"
-];
-function mirror(url) {
-  const http  = "https://r.jina.ai/http://"  + url.replace(/^https?:\/\//, "");
-  const https = "https://r.jina.ai/https://" + url.replace(/^https?:\/\//, "");
-  return [http, https];
-}
-
-const OUT_DIR   = fileURLToPath(new URL("../dist/", import.meta.url));
-const OUT_FILE  = OUT_DIR + "avisos.geojson";
-const DIAG_FILE = OUT_DIR + "avisos_diag.json";
-const SHP_FILE  = fileURLToPath(new URL("../data/emma_es.geojson", import.meta.url));
-
-const uniq = arr => Array.from(new Set(arr));
-const asArray = x => Array.isArray(x)? x : (x==null? [] : [x]);
-
-async function fetchText(url){
-  const r = await fetch(url, { dispatcher: agent, headers: HEADERS_XML, redirect: "follow" });
-  const text = await r.text();
-  const ct = r.headers.get("content-type") || "";
-  return { ok: r.ok, status: r.status, ct, text, url };
-}
-
-async function loadEmmaShapes(){
-  const txt = await readFile(SHP_FILE, "utf-8");
-  const gj = JSON.parse(txt);
-  if (!gj || gj.type!=="FeatureCollection" || !Array.isArray(gj.features)) {
-    throw new Error("data/emma_es.geojson no es una FeatureCollection válida");
-  }
-  const idx = new Map();
-  for (const f of gj.features){
-    const id = f?.properties?.EMMA_ID;
-    if (typeof id === "string" && f.geometry) idx.set(id.trim(), f.geometry);
-  }
-  if (!idx.size) throw new Error("data/emma_es.geojson no contiene EMMA_ID indexables");
-  return idx;
-}
-
-// intenta varios (directo, cache-busting y mirrors)
-async function fetchAndParseFeed(){
-  const attempts = [];
-  const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:"", removeNSPrefix:true });
-
-  const urls = [];
-  for (const base of FEEDS_BASE){
-    urls.push(base);
-    urls.push(base + "?_=" + Date.now());
-    urls.push(...mirror(base));
+  /* Estado / status */
+  .status {
+    top:8px; left:8px;
+    background:rgba(255,255,255,.95);
+    padding:4px 8px; border-radius:10px; box-shadow:0 2px 10px rgba(0,0,0,.08);
+    font-size:11px; max-width:75%;
   }
 
-  for (const u of urls){
-    try{
-      const res = await fetchText(u);
-      attempts.push({
-        url: res.url,
-        status: res.status,
-        ok: res.ok,
-        contentType: res.ct,
-        snippet: res.text.slice(0, 180).replace(/\s+/g, " ")
-      });
-      const looksXml = res.text.trim().startsWith("<");
-      if (!looksXml) continue;
+  /* Botón actualizar y botón leyenda */
+  .btn, .btn-legend {
+    top:8px; right:8px;
+    background:rgba(255,255,255,.95);
+    padding:6px 10px; border:1px solid #ddd; border-radius:10px; box-shadow:0 2px 10px rgba(0,0,0,.08);
+    font-size:12px; cursor:pointer;
+  }
+  .btn-legend { right:92px; } /* coloca el botón de leyenda a la izquierda del de actualizar */
 
-      let obj;
-      try { obj = parser.parse(res.text); } catch { obj = null; }
-      const hasEntries = (obj?.feed?.entry) || (obj?.rss?.channel?.item);
-      if (hasEntries) return { obj, attempts };
-    }catch(e){
-      attempts.push({ url: u, error: e?.message || String(e) });
+  /* Leyenda compacta + colapsable */
+  .legend {
+    bottom:10px; left:10px; max-width:220px;
+    background:rgba(255,255,255,.95);
+    padding:6px 8px; border-radius:10px; box-shadow:0 2px 10px rgba(0,0,0,.08);
+    font-size:11px; line-height:1.25;
+  }
+  .legend b{ display:block; margin-bottom:4px; font-size:12px; }
+  .dot{ display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+  .attr{ margin-top:4px; font-size:10px; color:#666; }
+  .legend.collapsed { display:none; }
+
+  /* Oculta atribución de Leaflet/OSM */
+  .leaflet-control-attribution{ display:none !important; }
+
+  /* Responsive: en pantallas estrechas colapsa la leyenda por defecto (JS también la colapsa) */
+  @media (max-width: 480px) {
+    .status { max-width:65%; font-size:10px; }
+    .btn, .btn-legend { font-size:11px; padding:5px 8px; }
+  }
+</style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="ui status" id="status">Cargando…</div>
+  <button class="ui btn-legend" id="btnLegend" type="button">Leyenda</button>
+  <button class="ui btn" id="btnRefresh" type="button">Actualizar</button>
+
+  <div class="ui legend" id="legend">
+    <b>Capas</b>
+    <div><span class="dot" style="background:#d7191c"></span> Alerta Roja</div>
+    <div><span class="dot" style="background:#fdae61"></span> Alerta Naranja</div>
+    <div><span class="dot" style="background:#ffff33"></span> Alerta Amarilla</div>
+    <div style="margin-top:4px"><span class="dot" style="background:#4a90e2"></span> Estaciones (temp.)</div>
+    <div class="attr">Mapa © OpenStreetMap contributors</div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    // URLs publicadas (GitHub Pages)
+    const ALERTAS_URL = 'https://lasbrigadasvoluntarias-dot.github.io/alertbrigadistas/avisos.geojson';
+    const OBS_URL     = 'https://lasbrigadasvoluntarias-dot.github.io/alertbrigadistas/obs.geojson';
+
+    const statusEl   = document.getElementById('status');
+    const btnRefresh = document.getElementById('btnRefresh');
+    const btnLegend  = document.getElementById('btnLegend');
+    const legendEl   = document.getElementById('legend');
+
+    // En móviles, empieza colapsada para no tapar el mapa
+    if (window.matchMedia('(max-width: 480px)').matches) legendEl.classList.add('collapsed');
+    btnLegend.addEventListener('click', () => legendEl.classList.toggle('collapsed'));
+
+    function setStatus(s){
+      const now = new Date().toLocaleTimeString('es-ES', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+      statusEl.textContent = s + ' • ' + now;
     }
-  }
-  return { obj: null, attempts };
-}
+    function esc(t){ return String(t||'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 
-function extractEntries(feedObj){
-  if (feedObj?.feed?.entry){
-    const entries = asArray(feedObj.feed.entry);
-    return entries.map(e => ({ e, isAtom: true }));
-  }
-  if (feedObj?.rss?.channel?.item){
-    const items = asArray(feedObj.rss.channel.item);
-    return items.map(e => ({ e, isAtom: false }));
-  }
-  return [];
-}
-
-// Extraer EMMA_ID y metadatos
-function mapEntryToAlert(entryWrap){
-  const { e, isAtom } = entryWrap;
-
-  let emma = null;
-  const geos = asArray(e?.geocode);
-  for (const g of geos){
-    const vn = (g?.valueName || g?.valuename || "").toUpperCase();
-    const vv = g?.value || g?.val || "";
-    if (vn === "EMMA_ID" && typeof vv === "string") { emma = vv.trim(); break; }
-  }
-
-  const areaDesc = e?.areaDesc || null;
-  const event    = e?.event || null;
-  const severity = e?.severity || null;
-  const urgency  = e?.urgency || null;
-  const certainty= e?.certainty || null;
-  const onset    = e?.onset || e?.effective || null;
-  const expires  = e?.expires || null;
-  const identifier = e?.identifier || e?.id || null;
-  const headline = isAtom ? (e?.title || null) : (e?.title?.["#text"] || e?.title || null);
-  const sent     = e?.sent || e?.updated || null;
-
-  return { emma, props: { source:"MeteoalarmFeed", areaDesc, event, severity, urgency, certainty, onset, expires, identifier, headline, sent } };
-}
-
-async function main(){
-  await mkdir(OUT_DIR, { recursive: true });
-  const diag = { feedAttempts: [], totalEntries:0, joined:0, missingShapes:[], error:null, sampleProps:null };
-
-  try{
-    const emmaIndex = await loadEmmaShapes();
-
-    const { obj, attempts } = await fetchAndParseFeed();
-    diag.feedAttempts = attempts;
-
-    if (!obj){
-      diag.error = "feed: imposible obtener Atom/RSS válido";
-      await writeFile(OUT_FILE, JSON.stringify({ type:"FeatureCollection", features:[] }));
-      await writeFile(DIAG_FILE, JSON.stringify(diag, null, 2));
-      return;
+    function colorSev(sev){
+      const s=(sev||'').toLowerCase();
+      if (s.includes('red')||s.includes('rojo')||s.includes('severe')||s.includes('extreme')) return '#d7191c';
+      if (s.includes('orange')||s.includes('naranja')||s.includes('moderate')) return '#fdae61';
+      if (s.includes('yellow')||s.includes('amarillo')||s.includes('minor')) return '#ffff33';
+      return '#66bd63';
+    }
+    function colorTemp(t){
+      const v=Number(t);
+      if (!Number.isFinite(v)) return '#4a90e2';
+      if (v >= 35) return '#b10026';
+      if (v >= 30) return '#e31a1c';
+      if (v >= 25) return '#fd8d3c';
+      if (v >= 20) return '#feb24c';
+      if (v >= 10) return '#addd8e';
+      return '#2b8cbe';
     }
 
-    const rawEntries = extractEntries(obj);
-    const alerts = rawEntries.map(mapEntryToAlert).filter(Boolean);
-    diag.totalEntries = alerts.length;
+    // Mapa: habilita gestos táctiles explícitamente (Leaflet lo hace por defecto, pero reforzamos)
+    const map = L.map('map', {
+      zoomControl:true,
+      attributionControl:false,
+      dragging:true,
+      scrollWheelZoom:true,
+      touchZoom:true,
+      zoom: 6,
+      center: [40.3,-3.7]
+    });
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution:'' }).addTo(map);
+    setTimeout(()=>map.invalidateSize(), 300);
 
-    const features = [];
-    const missing = [];
-    const seen = new Set();
+    // Capas
+    const layerAvisos = L.geoJSON(null, {
+      style: f => ({ color:'#333', weight:1, fillOpacity:.5, fillColor: colorSev(f.properties?.severity || f.properties?.nivel) }),
+      onEachFeature: (f, l) => {
+        const p=f.properties||{};
+        const head=p.headline||p.event||'Aviso';
+        const zona=p.areaDesc||p.area||p.EMMA_ID||'—';
+        const sev=p.severity||p.nivel||'—';
+        const val=(p.onset||'—')+' → '+(p.expires||'—');
+        const desc=p.description?`<hr style="border:none;border-top:1px solid #ddd;margin:6px 0">${esc(p.description)}`:'';
+        const instr=p.instruction?`<div style="margin-top:6px"><b>Indicaciones:</b> ${esc(p.instruction)}</div>`:'';
+        l.bindPopup(`<b>${esc(head)}</b><br><b>Zona:</b> ${esc(zona)}<br><b>Severidad:</b> ${esc(sev)}<br><b>Validez:</b> ${esc(val)}${desc}${instr}`);
+      }
+    }).addTo(map);
 
-    for (const it of alerts){
-      if (!it.emma){ missing.push("NO_EMMA_ID"); continue; }
-      const geom = emmaIndex.get(it.emma);
-      if (!geom){ missing.push(it.emma); continue; }
-      const id = (it.props.identifier || it.emma) + "|" + (it.props.onset || "") + "|" + (it.props.expires || "");
-      if (seen.has(id)) continue;
-      seen.add(id);
-      features.push({ type:"Feature", properties:{ ...it.props, EMMA_ID: it.emma }, geometry: geom });
+    const layerObs = L.layerGroup();
+    L.control.layers({}, { "Alertas": layerAvisos, "Estaciones (temp)": layerObs }, { collapsed:true }).addTo(map);
+
+    async function cargarAvisos(){
+      setStatus('Cargando alertas…');
+      try{
+        const r = await fetch(ALERTAS_URL + '?t=' + Date.now(), { cache:'no-store' });
+        if (!r.ok){ setStatus('Error alertas ' + r.status); return; }
+        const geo = await r.json();
+        layerAvisos.clearLayers();
+        if (geo?.features?.length){
+          layerAvisos.addData(geo);
+          try { map.fitBounds(layerAvisos.getBounds(), { padding:[18,18] }); } catch(e){}
+        }
+        setStatus(`Alertas: ${geo?.features?.length || 0}`);
+      }catch(e){ setStatus('Error alertas: ' + String(e).slice(0,100)); }
     }
 
-    diag.joined = features.length;
-    diag.missingShapes = uniq(missing).sort();
-    diag.sampleProps = features[0]?.properties || null;
+    async function cargarObs(){
+      setStatus('Cargando estaciones…');
+      try{
+        const r = await fetch(OBS_URL + '?t=' + Date.now(), { cache:'no-store' });
+        if (!r.ok){ setStatus('Error estaciones ' + r.status); return; }
+        const geo = await r.json();
+        layerObs.clearLayers();
+        (geo?.features||[]).forEach(f=>{
+          const p=f.properties||{}, [lon,lat]=f.geometry?.coordinates||[];
+          if (!Number.isFinite(lon)||!Number.isFinite(lat)) return;
+          const marker = L.circleMarker([lat,lon], { radius: 5, color:'#222', weight:1, fillColor: colorTemp(p.ta), fillOpacity:.85 });
+          const viento = (p.vv!=null? `${p.vv} m/s` : '—') + (p.dv!=null? ` (${p.dv}°)` : '');
+          marker.bindPopup(`<b>${esc(p.nombre||p.id||'Estación')}</b><br><b>Instante:</b> ${esc(p.instante||'—')}<br><b>Temp.:</b> ${p.ta!=null? esc(p.ta)+' °C':'—'}<br><b>Humedad:</b> ${p.hr!=null? esc(p.hr)+' %':'—'}<br><b>Viento:</b> ${esc(viento)}<br><b>Presión:</b> ${p.pres!=null? esc(p.pres)+' hPa':'—'}<br><b>Precip.:</b> ${p.prec!=null? esc(p.prec)+' mm':'—'}`);
+          layerObs.addLayer(marker);
+        });
+        setStatus(`Estaciones: ${geo?.features?.length || 0}`);
+      }catch(e){ setStatus('Error estaciones: ' + String(e).slice(0,100)); }
+    }
 
-    await writeFile(OUT_FILE, JSON.stringify({ type:"FeatureCollection", features }));
-    await writeFile(DIAG_FILE, JSON.stringify(diag, null, 2));
-    console.log(`Avisos: ${features.length} features publicadas. EMMA sin shape: ${diag.missingShapes.length}`);
-  }catch(err){
-    diag.error = "fatal: " + (err?.message||String(err));
-    await writeFile(OUT_FILE, JSON.stringify({ type:"FeatureCollection", features:[] }));
-    await writeFile(DIAG_FILE, JSON.stringify(diag, null, 2));
-  }
-}
+    async function cargarTodo(){ await Promise.all([cargarAvisos(), cargarObs()]); }
+    btnRefresh.addEventListener('click', cargarTodo);
 
-main().catch(e=>{ console.error(e); });
-
-
+    // primer render + refresco automático cada 5 min
+    cargarTodo();
+    setInterval(cargarTodo, 5*60*1000);
+  </script>
+</body>
+</html>
