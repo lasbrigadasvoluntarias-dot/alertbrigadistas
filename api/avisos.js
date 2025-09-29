@@ -1,6 +1,10 @@
 // api/avisos.js
-// Requiere Node 18+ y "fast-xml-parser" en package.json
+// Node 18+ | deps: fast-xml-parser (undici viene en Node 18)
 const { XMLParser } = require("fast-xml-parser");
+const { Agent } = require("undici");
+
+// Fuerza IPv4 y timeouts prudentes (evita fallos de red en AEMET)
+const agent = new Agent({ connect: { family: 4, timeout: 15_000 } });
 
 const BASE = "https://opendata.aemet.es/opendata/api/avisos_cap";
 const DESCRIPTORS = [
@@ -8,7 +12,6 @@ const DESCRIPTORS = [
   `${BASE}/ultimaelaboracion?area=esp`
 ];
 
-// ---------- helpers geom ----------
 const toNum = (x) => { const n = parseFloat(x); return Number.isFinite(n) ? n : null; };
 
 function parsePolygonString(polyStr){
@@ -44,8 +47,7 @@ function mapSeverity(info){
   let sev = info?.severity || "";
   const ecs = Array.isArray(info?.eventCode) ? info.eventCode : (info?.eventCode ? [info.eventCode] : []);
   for (const c of ecs){
-    const name=(c?.valueName||"").toLowerCase();
-    const val=(c?.value||"").toLowerCase();
+    const name=(c?.valueName||"").toLowerCase(); const val=(c?.value||"").toLowerCase();
     if (name.includes("awareness_level")){
       if (/red|rojo|extreme|severe/.test(val)) sev ||= "Severe";
       if (/orange|naranja|moderate/.test(val)) sev ||= "Moderate";
@@ -77,7 +79,6 @@ function capToGeoJSON(cap){
   return { type:"FeatureCollection", features };
 }
 
-// ---------- handler ----------
 module.exports = async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   try {
@@ -85,61 +86,59 @@ module.exports = async (req, res) => {
     const KEY = url.searchParams.get("key") || process.env.AEMET_API_KEY;
     if (!KEY) return res.status(500).json({ error:"FALTA_API_KEY" });
 
-    // STEP1: probar rutas de descriptor con api_key en CABECERA; si no, probar con query
-    let desc = null, step1Diag = [];
+    // STEP1: probar dos rutas, con key en cabecera y en query. Siempre forzando IPv4 via dispatcher.
+    let desc=null, diag=[];
     for (const path of DESCRIPTORS){
-      // A) cabecera
       try {
-        const r = await fetch(path, { cache:"no-store", headers:{ "Accept":"application/json", "api_key": KEY }});
-        const t = await r.text();
-        try { const j = JSON.parse(t); if (r.ok && j?.datos) { desc = j; break; } else step1Diag.push({path, mode:"header", status:r.status, head:t.slice(0,160)}); }
-        catch { step1Diag.push({path, mode:"header", status:r.status, head:t.slice(0,160)}); }
-      } catch (e) { step1Diag.push({path, mode:"header", fetch:String(e?.message||e)}); }
+        // A) header
+        const rH = await fetch(path, { cache:"no-store", dispatcher: agent, headers:{ "Accept":"application/json", "api_key": KEY, "User-Agent":"alertbrigadistas/1.0" }});
+        const tH = await rH.text();
+        try { const jH = JSON.parse(tH); if (rH.ok && jH?.datos) { desc=jH; break; } else diag.push({path, via:"header", status:rH.status, head:tH.slice(0,160)}); }
+        catch { diag.push({path, via:"header", status:rH.status, head:tH.slice(0,160)}); }
+      } catch (e) { diag.push({path, via:"header", fetch: e.cause?.code || e.code || String(e.message||e)}); }
 
-      // B) query
       try {
+        // B) query
         const sep = path.includes("?") ? "&" : "?";
-        const r = await fetch(path + `${sep}api_key=${encodeURIComponent(KEY)}`, { cache:"no-store", headers:{ "Accept":"application/json" }});
-        const t = await r.text();
-        try { const j = JSON.parse(t); if (r.ok && j?.datos) { desc = j; break; } else step1Diag.push({path, mode:"query", status:r.status, head:t.slice(0,160)}); }
-        catch { step1Diag.push({path, mode:"query", status:r.status, head:t.slice(0,160)}); }
-      } catch (e) { step1Diag.push({path, mode:"query", fetch:String(e?.message||e)}); }
+        const rQ = await fetch(path + `${sep}api_key=${encodeURIComponent(KEY)}`, { cache:"no-store", dispatcher: agent, headers:{ "Accept":"application/json", "User-Agent":"alertbrigadistas/1.0" }});
+        const tQ = await rQ.text();
+        try { const jQ = JSON.parse(tQ); if (rQ.ok && jQ?.datos) { desc=jQ; break; } else diag.push({path, via:"query", status:rQ.status, head:tQ.slice(0,160)}); }
+        catch { diag.push({path, via:"query", status:rQ.status, head:tQ.slice(0,160)}); }
+      } catch (e) { diag.push({path, via:"query", fetch: e.cause?.code || e.code || String(e.message||e)}); }
     }
-    if (!desc) return res.status(502).json({ error:"STEP1_FALLO_DESCRIPTOR", tries: step1Diag });
+    if (!desc) return res.status(502).json({ error:"STEP1_FALLO_DESCRIPTOR", tries: diag });
 
-    // STEP2: descargar CAP; si JSON/HTML inesperado o error, reintentar añadiendo api_key
-    const fetchCap = async (rawUrl) => {
+    // STEP2: descarga del CAP (XML). Reintenta añadiendo api_key si hace falta.
+    const fetchCap = async (u) => {
       try {
-        const r = await fetch(rawUrl, { cache:"no-store", headers:{ "Accept":"application/xml" }});
+        const r = await fetch(u, { cache:"no-store", dispatcher: agent, headers:{ "Accept":"application/xml", "User-Agent":"alertbrigadistas/1.0" }});
         const t = await r.text();
-        if (r.ok && /^\s*</.test(t)) return { ok:true, t, triedSuffix:false, status:r.status };
-        // reintento con ?api_key
-        const sep = rawUrl.includes("?") ? "&" : "?";
-        const r2 = await fetch(rawUrl + `${sep}api_key=${encodeURIComponent(KEY)}`, { cache:"no-store", headers:{ "Accept":"application/xml" }});
-        const t2 = await r2.text();
-        return { ok: r2.ok && /^\s*</.test(t2), t: t2, triedSuffix:true, status:r2.status };
+        if (r.ok && /^\s*</.test(t)) return { ok:true, t, status:r.status, withKey:false };
       } catch (e) {
-        return { ok:false, t:String(e?.message||e), triedSuffix:false, status:null };
+        // seguimos al reintento con ?api_key
       }
+      const sep = u.includes("?") ? "&" : "?";
+      const r2 = await fetch(u + `${sep}api_key=${encodeURIComponent(KEY)}`, { cache:"no-store", dispatcher: agent, headers:{ "Accept":"application/xml", "User-Agent":"alertbrigadistas/1.0" }});
+      const t2 = await r2.text();
+      return { ok: r2.ok && /^\s*</.test(t2), t: t2, status:r2.status, withKey:true };
     };
-    const capRes = await fetchCap(desc.datos);
-    if (!capRes.ok) return res.status(502).json({ error:"STEP2_FALLO_CAP", status: capRes.status, withKeySuffix: capRes.triedSuffix, head: String(capRes.t).slice(0,200) });
 
-    // Parseo XML → GeoJSON
+    const capRes = await fetchCap(desc.datos);
+    if (!capRes.ok) return res.status(502).json({ error:"STEP2_FALLO_CAP", status: capRes.status, withKeySuffix: capRes.withKey, head: String(capRes.t).slice(0,200) });
+
+    // XML → GeoJSON
     let capObj;
     try {
       const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:"" });
       capObj = parser.parse(capRes.t);
-    } catch (e) {
-      return res.status(502).json({ error:"XML_INVALIDO", message:String(e?.message||e) });
-    }
+    } catch (e) { return res.status(502).json({ error:"XML_INVALIDO", message:String(e?.message||e) }); }
 
     const geo = capToGeoJSON(capObj);
     res.setHeader("Cache-Control","public, max-age=90");
     res.setHeader("Content-Type","application/geo+json; charset=utf-8");
     return res.status(200).send(JSON.stringify(geo));
   } catch (e) {
-    return res.status(500).json({ error:"FALLO_DESCONOCIDO", detail:String(e?.message||e) });
+    return res.status(500).json({ error:"FALLO_DESCONOCIDO", detail: String(e?.message||e) });
   }
 };
 
