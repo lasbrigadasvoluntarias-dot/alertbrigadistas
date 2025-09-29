@@ -1,0 +1,6 @@
+{
+  "regions": ["fra1", "cdg1"],
+  "functions": {
+    "api/**/*.js": { "maxDuration": 10 }
+  }
+}
