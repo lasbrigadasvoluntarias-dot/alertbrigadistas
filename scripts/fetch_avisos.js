@@ -6,21 +6,19 @@ import { XMLParser } from "fast-xml-parser";
 import { Agent } from "undici";
 
 const AEMET_KEY = process.env.AEMET_API_KEY || "";
+const METEOALARM_TOKEN = process.env.METEOALARM_TOKEN || ""; // <-- añade este secret
 const agent = new Agent({ connect: { family: 4, timeout: 15000 } });
+
 const UA_JSON = { "User-Agent": "alertbrigadistas/1.0 (+github actions)", "Accept": "application/json" };
 const UA_XML  = { "User-Agent": "alertbrigadistas/1.0 (+github actions)", "Accept": "application/xml, text/xml" };
 
+// --- AEMET (respaldo) ---
 const AEMET_DESC_URLS = [
   "https://opendata.aemet.es/opendata/api/avisos_cap/ultimaelaboracion/area/esp",
   "https://opendata.aemet.es/opendata/api/avisos_cap/ultimaelaboracion?area=esp"
 ];
 
-const METEOALARM_FEEDS = [
-  "https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-atom-spain",
-  "https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-rss-spain"
-];
-
-// ---------- util ----------
+// ---------- Utilidades CAP→GeoJSON (por si usamos AEMET como respaldo) ----------
 const toNum = (x)=>{ const n=parseFloat(x); return Number.isFinite(n)?n:null; };
 function parsePolygonString(polyStr){
   const t=String(polyStr||"").trim(); if(!t) return null;
@@ -32,7 +30,7 @@ function parsePolygonString(polyStr){
     const vals=t.split(/[;\s]+/).map(toNum).filter(v=>v!=null);
     for(let i=0;i+1<vals.length;i+=2) coords.push([vals[i+1], vals[i]]);
   }
-  if(coords.length&&(coords[0][0]!==coords.at(-1)[0]||coords[0][1]!==coords.at(-1)[1])) coords.push(coords[0]);
+  if(coords.length && (coords[0][0]!==coords.at(-1)[0] || coords[0][1]!==coords.at(-1)[1])) coords.push(coords[0]);
   return coords.length>=4 ? coords : null;
 }
 function parseCircleString(circleStr){
@@ -43,15 +41,16 @@ function parseCircleString(circleStr){
   const R=6371, rad=rkm/R, lat0=lat*Math.PI/180, lon0=lon*Math.PI/180, steps=64, ring=[];
   for(let i=0;i<=steps;i++){
     const brng=(2*Math.PI*i)/steps;
-    const latp=Math.asin(Math.sin(lat0)*Math.cos(rad)+Math.cos(lat0)*Math.sin(rad)*Math.cos(brng));
+    const latp=Math.asin(Math.sin(lat0)*cos(rad)+Math.cos(lat0)*Math.sin(rad)*Math.cos(brng));
     const lonp=lon0+Math.atan2(Math.sin(brng)*Math.sin(rad)*Math.cos(lat0),Math.cos(rad)-Math.sin(lat0)*Math.sin(latp));
+    function cos(x){return Math.cos(x)}
     ring.push([lonp*180/Math.PI, latp*180/Math.PI]);
   }
   return ring;
 }
-function mapSeverity(info){
+function mapSeverityFromEventCode(info){
   let sev=info?.severity||"";
-  const ecs = Array.isArray(info?.eventCode) ? info.eventCode : (info?.eventCode ? [info?.eventCode] : []);
+  const ecs = Array.isArray(info?.eventCode) ? info.eventCode : (info?.eventCode ? [info.eventCode] : []);
   for (const c of ecs){
     const name=(c?.valueName||"").toLowerCase(), val=(c?.value||"").toLowerCase();
     if (name.includes("awareness_level")){
@@ -70,7 +69,7 @@ function capToGeoJSON(cap){
     const infos = Array.isArray(alert?.info) ? alert.info : (alert?.info ? [alert.info] : []);
     for (const info of infos){
       const { event, headline, description, instruction, urgency, certainty, effective, onset, expires } = info || {};
-      const severity = mapSeverity(info) || info?.severity || "";
+      const severity = mapSeverityFromEventCode(info) || info?.severity || "";
       const areas = Array.isArray(info?.area) ? info.area : (info?.area ? [info.area] : []);
       for (const a of areas){
         const props = { ...base, event, headline, description, instruction, urgency, severity, certainty, effective, onset, expires, areaDesc: a?.areaDesc || null };
@@ -84,16 +83,48 @@ function capToGeoJSON(cap){
   return { type:"FeatureCollection", features };
 }
 
+// ---------- helpers ----------
 async function fetchText(url, headers){
   const r = await fetch(url, { dispatcher: agent, headers });
   const t = await r.text();
   return { ok:r.ok, status:r.status, text:t, url };
 }
 
-// AEMET primero
+// --- 1) Meteoalarm EDR (GeoJSON con geometría; requiere token) ---
+async function getMeteoalarmGeoJSON(){
+  if (!METEOALARM_TOKEN) return null;
+
+  // Endpoint “locations/ES” (GeoJSON). Se puede pasar Authorization: Bearer <token> o ?token=<token>.
+  // Custom params útiles (documentados): active (intervalo), language, awareness_type, awareness_level, page. :contentReference[oaicite:1]{index=1}
+  const base = "https://api.meteoalarm.org/edr/v1/collections/warnings/locations/ES";
+  const q = "?f=geojson&active&language=es-ES"; // ‘active’ sin valor = activo ahora; idioma ES (si soporta)
+  // 1) Con Authorization header
+  try{
+    const r1 = await fetch(base + q, {
+      dispatcher: agent,
+      headers: { "Authorization": `Bearer ${METEOALARM_TOKEN}`, "Accept": "application/geo+json, application/json" }
+    });
+    if (r1.ok) return await r1.text();
+  }catch{}
+
+  // 2) Con query ?token=
+  try{
+    const sep = q ? "&" : "?";
+    const r2 = await fetch(base + q + `${sep}token=${encodeURIComponent(METEOALARM_TOKEN)}`, {
+      dispatcher: agent,
+      headers: { "Accept": "application/geo+json, application/json" }
+    });
+    if (r2.ok) return await r2.text();
+  }catch{}
+
+  return null;
+}
+
+// --- 2) AEMET CAP (respaldo a GeoJSON) ---
 async function getAemetCAPXml(){
   if (!AEMET_KEY) return null;
   for (const base of AEMET_DESC_URLS){
+    // a) api_key en cabecera
     try{
       let {ok,text} = await fetchText(base, { ...UA_JSON, "api_key": AEMET_KEY });
       if (ok){
@@ -110,6 +141,7 @@ async function getAemetCAPXml(){
         }catch{}
       }
     }catch{}
+    // b) api_key en query
     try{
       const sep = base.includes("?") ? "&" : "?";
       let {ok,text} = await fetchText(base + `${sep}api_key=${encodeURIComponent(AEMET_KEY)}`, UA_JSON);
@@ -131,154 +163,59 @@ async function getAemetCAPXml(){
   return null;
 }
 
-// Meteoalarm: extraer URLs CAP del Atom/RSS
-function parseFeedForCapLinks(xml){
-  const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:"", removeNSPrefix:true });
-  const obj = parser.parse(xml||"");
-  const links = new Set();
-
-  if (obj?.feed?.entry){
-    const entries = Array.isArray(obj.feed.entry)? obj.feed.entry: [obj.feed.entry];
-    for (const e of entries){
-      const ls = e.link ? (Array.isArray(e.link)? e.link : [e.link]) : [];
-      for (const l of ls){
-        const href = l?.href || l;
-        const type = (l?.type || "").toLowerCase();
-        if (typeof href === "string"){
-          if (type.includes("cap+xml") || type.includes("application/cap")) links.add(href);
-          else if (/\.xml($|\?)/i.test(href)) links.add(href);
-        }
-      }
-      if (typeof e.id === "string" && (e.id.includes("application/cap") || /\.xml($|\?)/i.test(e.id))) links.add(e.id);
-      const c = e.content;
-      if (typeof c === "string" && /^https?:\/\//.test(c) && (/\.xml($|\?)/i.test(c) || c.includes("application/cap"))) links.add(c);
-      if (c?.url && (/\.xml($|\?)/i.test(c.url) || String(c.url).includes("application/cap"))) links.add(c.url);
-    }
-  }
-  const ch = obj?.rss?.channel;
-  if (ch?.item){
-    const items = Array.isArray(ch.item) ? ch.item : [ch.item];
-    for (const it of items){
-      if (typeof it.link === "string" && (/\.xml($|\?)/i.test(it.link) || it.link.includes("application/cap"))) links.add(it.link);
-      if (typeof it.guid === "string" && (/\.xml($|\?)/i.test(it.guid) || it.guid.includes("application/cap"))) links.add(it.guid);
-      if (it.guid?.["#text"] && (/\.xml($|\?)/i.test(it.guid["#text"]) || String(it.guid["#text"]).includes("application/cap"))) links.add(it.guid["#text"]);
-    }
-  }
-  return Array.from(links);
-}
-
-async function fetchMeteoalarmCAPs(diag){
-  for (const feedUrl of METEOALARM_FEEDS){
-    try{
-      const {ok, text, status} = await fetchText(feedUrl, { ...UA_XML, "Accept": "application/atom+xml, application/rss+xml, application/xml, text/xml" });
-      if (!ok) { diag.feeds.push({feedUrl,status,ok}); continue; }
-      const capLinks = parseFeedForCapLinks(text);
-      diag.feeds.push({feedUrl,status,ok, capLinks: capLinks.length});
-      if (!capLinks.length) continue;
-
-      const xmls = [];
-      const batch = 10;
-      for (let i=0; i<capLinks.length; i+=batch){
-        const slice = capLinks.slice(i, i+batch);
-        const got = await Promise.all(slice.map(async (u)=>{
-          try{
-            const r = await fetch(u, { dispatcher: agent, headers: UA_XML });
-            const t = await r.text();
-            return (r.ok && t.trim().startsWith("<")) ? t : null;
-          }catch{return null;}
-        }));
-        for (const x of got) if (x) xmls.push(x);
-      }
-      diag.capDownloaded += xmls.length;
-      if (xmls.length) return xmls;
-    }catch(e){
-      diag.feeds.push({feedUrl,error: e?.message||String(e)});
-    }
-  }
-  return [];
-}
-
-function capXmlArrayToGeoJSON(xmlArr, diag){
-  const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:"", removeNSPrefix:true });
-  const features = [];
-  const seen = new Set();
-  let withPoly=0, withCircle=0;
-
-  for (let k=0; k<xmlArr.length; k++){
-    const xml = xmlArr[k];
-    let cap;
-    try { cap = parser.parse(xml); } catch { continue; }
-    const alerts = Array.isArray(cap.alert) ? cap.alert : (cap.alert ? [cap.alert] : []);
-    for (const alert of alerts){
-      const infos = Array.isArray(alert?.info) ? alert.info : (alert?.info ? [alert.info] : []);
-      for (const info of infos){
-        const areas = Array.isArray(info?.area) ? info.area : (info?.area ? [info.area] : []);
-        for (const a of areas){
-          const polys = a?.polygon ? (Array.isArray(a.polygon) ? a.polygon : [a.polygon]) : [];
-          const circles = a?.circle ? (Array.isArray(a.circle) ? a.circle : [a.circle]) : [];
-          if (polys.length) withPoly++;
-          if (circles.length) withCircle++;
-        }
-      }
-    }
-    const g = capToGeoJSON(cap);
-    for (const f of g.features){
-      const id = (f.properties?.identifier || "") + "|" + (f.properties?.onset || "") + "|" + (f.properties?.expires || "");
-      if (!seen.has(id)){ seen.add(id); features.push(f); }
-    }
-    if (k<2) diag.samples.push(xml.slice(0,2000)); // guarda 2 muestras truncadas
-  }
-  diag.withPoly = withPoly;
-  diag.withCircle = withCircle;
-  return { type:"FeatureCollection", features };
-}
-
-// ---------- main ----------
+// --- MAIN ---
 async function main(){
-  const outDir = fileURLToPath(new URL("../dist/", import.meta.url));
-  await mkdir(outDir, { recursive: true });
+  const outDir  = fileURLToPath(new URL("../dist/", import.meta.url));
   const outFile = outDir + "avisos.geojson";
-  const diagFile = outDir + "avisos_diag.json";
+  await mkdir(outDir, { recursive: true });
 
-  const diag = { feeds: [], capDownloaded: 0, withPoly: 0, withCircle: 0, features: 0, samples: [] };
+  let published = false;
 
-  let geo = null;
-
-  // 1) AEMET
+  // 1) Meteoalarm EDR
   try{
-    const capXml = await getAemetCAPXml();
-    if (capXml){
-      const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:"", removeNSPrefix:true });
-      const cap = parser.parse(capXml);
-      const g = capToGeoJSON(cap);
-      if ((g.features||[]).length){
-        geo = g;
+    const gj = await getMeteoalarmGeoJSON();
+    if (gj){
+      // Debe ser FeatureCollection con features[]. El portal indica GeoJSON, con geometrías “bounding boxes”. :contentReference[oaicite:2]{index=2}
+      const parsed = JSON.parse(gj);
+      if (parsed && (parsed.type === "FeatureCollection") && Array.isArray(parsed.features) && parsed.features.length){
+        await writeFile(outFile, JSON.stringify(parsed));
+        console.log("EDR: publicado con", parsed.features.length, "features");
+        published = true;
+      } else {
+        console.warn("EDR: GeoJSON sin features; probamos AEMET");
       }
+    } else {
+      console.warn("EDR: sin respuesta válida; probamos AEMET");
     }
-  }catch{}
-
-  // 2) Meteoalarm
-  if (!geo){
-    const xmlArr = await fetchMeteoalarmCAPs(diag);
-    if (xmlArr.length){
-      const g = capXmlArrayToGeoJSON(xmlArr, diag);
-      if ((g.features||[]).length) geo = g;
-      diag.features = g.features?.length || 0;
-    }
+  }catch(e){
+    console.warn("EDR: error", e?.message||e);
   }
 
-  // escribir diag SIEMPRE
-  await writeFile(diagFile, JSON.stringify(diag, null, 2));
+  // 2) Respaldo AEMET CAP → GeoJSON
+  if (!published){
+    try{
+      const capXml = await getAemetCAPXml();
+      if (capXml){
+        const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:"", removeNSPrefix:true });
+        const cap = parser.parse(capXml);
+        const g = capToGeoJSON(cap);
+        if ((g.features||[]).length){
+          await writeFile(outFile, JSON.stringify(g));
+          console.log("AEMET: publicado con", g.features.length, "features");
+          published = true;
+        } else {
+          console.warn("AEMET: CAP sin geometría utilizable");
+        }
+      }
+    }catch(e){ console.warn("AEMET error", e?.message||e); }
+  }
 
-  // 3) Escribir GeoJSON (válido, o conservar último, o vacío)
-  if (geo && (geo.features||[]).length){
-    await writeFile(outFile, JSON.stringify(geo));
-    console.log("Avisos: publicado con", geo.features.length, "features");
-  } else {
+  // 3) Si nada funcionó: conservar último o vacío
+  if (!published){
     try {
       const prev = await readFile(outFile, "utf-8");
       await writeFile(outFile, prev);
-      console.warn("Avisos: sin geometría; se conserva el último fichero");
+      console.warn("Avisos: sin fuente válida; se conserva el último fichero");
     } catch {
       await writeFile(outFile, JSON.stringify({ type:"FeatureCollection", features:[] }));
       console.warn("Avisos: sin fuente y sin anterior; publicado vacío");
