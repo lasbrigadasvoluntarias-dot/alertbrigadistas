@@ -13,11 +13,14 @@ async function main(){
   const outFile = outDir + "obs.geojson";
   const diagFile = outDir + "obs_diag.json";
 
-  let diag = { descriptorOk:false, datosUrl:null, parseCount:0, error:null };
+  const diag = { descriptorOk:false, datosUrl:null, parseCount:0, error:null };
 
   let desc = null;
   try{
-    const r1 = await fetch(`https://opendata.aemet.es/opendata/api/observacion/convencional/todas?api_key=${encodeURIComponent(AEMET_KEY)}`, { dispatcher: agent, headers: { ...UA, "Accept":"application/json" }});
+    const r1 = await fetch(
+      `https://opendata.aemet.es/opendata/api/observacion/convencional/todas?api_key=${encodeURIComponent(AEMET_KEY)}`,
+      { dispatcher: agent, headers: { ...UA, "Accept":"application/json" } }
+    );
     const t1 = await r1.text();
     const j = JSON.parse(t1);
     if (r1.ok && j?.datos) { desc = j; diag.descriptorOk = true; }
@@ -31,7 +34,8 @@ async function main(){
       let t2 = await r2.text();
       if (!r2.ok || !t2.trim().startsWith("[")){
         const sep = desc.datos.includes("?") ? "&" : "?";
-        r2 = await fetch(desc.datos + `${sep}api_key=${encodeURIComponent(AEMET_KEY)}`, { dispatcher: agent, headers: { ...UA, "Accept":"application/json" }});
+        r2 = await fetch(desc.datos + `${sep}api_key=${encodeURIComponent(AEMET_KEY)}`,
+          { dispatcher: agent, headers: { ...UA, "Accept":"application/json" }});
         t2 = await r2.text();
       }
       let arr = [];
@@ -66,5 +70,4 @@ async function main(){
   console.log("Obs: estaciones:", feats.length);
 }
 main().catch(e=>{ console.error(e); process.exit(0); });
-
 
