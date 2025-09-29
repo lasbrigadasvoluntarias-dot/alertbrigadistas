@@ -1,5 +1,4 @@
-// Node 20 (GitHub Actions)
-// deps: undici
+// Node 20
 import { writeFile, mkdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { Agent } from "undici";
@@ -12,17 +11,22 @@ async function main(){
   const outDir = fileURLToPath(new URL("../dist/", import.meta.url));
   await mkdir(outDir, { recursive: true });
   const outFile = outDir + "obs.geojson";
+  const diagFile = outDir + "obs_diag.json";
+
+  let diag = { descriptorOk:false, datosUrl:null, parseCount:0, error:null };
 
   let desc = null;
   try{
     const r1 = await fetch(`https://opendata.aemet.es/opendata/api/observacion/convencional/todas?api_key=${encodeURIComponent(AEMET_KEY)}`, { dispatcher: agent, headers: { ...UA, "Accept":"application/json" }});
     const t1 = await r1.text();
-    try { const j = JSON.parse(t1); if (r1.ok && j?.datos) desc = j; } catch {}
-  }catch(e){ console.warn("OBS descriptor fallo", e?.message||e); }
+    const j = JSON.parse(t1);
+    if (r1.ok && j?.datos) { desc = j; diag.descriptorOk = true; }
+  }catch(e){ diag.error = "descriptor: "+(e?.message||String(e)); }
 
   let feats = [];
   if (desc?.datos){
     try{
+      diag.datosUrl = desc.datos;
       let r2 = await fetch(desc.datos, { dispatcher: agent, headers: { ...UA, "Accept":"application/json" }});
       let t2 = await r2.text();
       if (!r2.ok || !t2.trim().startsWith("[")){
@@ -31,7 +35,7 @@ async function main(){
         t2 = await r2.text();
       }
       let arr = [];
-      try { arr = JSON.parse(t2); } catch {}
+      try { arr = JSON.parse(t2); } catch(e){ diag.error = "parse datos: "+(e?.message||String(e)); }
       for (const it of arr){
         const lon = Number(it.lon ?? it.longitude), lat = Number(it.lat ?? it.latitude);
         if (!Number.isFinite(lon)||!Number.isFinite(lat)) continue;
@@ -44,8 +48,8 @@ async function main(){
           geometry:{ type:"Point", coordinates:[lon,lat] }
         });
       }
-      console.log("Obs: estaciones:", feats.length);
-    }catch(e){ console.warn("OBS datos fallo", e?.message||e); }
+      diag.parseCount = feats.length;
+    }catch(e){ diag.error = "datos: "+(e?.message||String(e)); }
   }
 
   if (feats.length){
@@ -54,15 +58,12 @@ async function main(){
     try {
       const prev = await readFile(outFile, "utf-8");
       await writeFile(outFile, prev);
-      console.warn("Obs: sin datos; se conserva el último fichero");
     } catch {
       await writeFile(outFile, JSON.stringify({ type:"FeatureCollection", features:[] }));
-      console.warn("Obs: sin datos y sin anterior; publicado vacío");
     }
   }
+  await writeFile(diagFile, JSON.stringify(diag, null, 2));
+  console.log("Obs: estaciones:", feats.length);
 }
-
 main().catch(e=>{ console.error(e); process.exit(0); });
-
-
 
