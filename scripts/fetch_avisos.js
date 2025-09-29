@@ -139,20 +139,22 @@ async function getAemetCAPXml(){
 
 // 2) METEOALARM (respaldo público)
 function parseFeedForCapLinks(xml){
-  // Devuelve array de URLs a mensajes CAP XML
   const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:"", removeNSPrefix:true });
   const obj = parser.parse(xml||"");
   const links = new Set();
 
-  // Atom: feed.entry[].link (pueden ser varios)
+  // Atom
   if (obj?.feed?.entry){
     const entries = Array.isArray(obj.feed.entry)? obj.feed.entry: [obj.feed.entry];
     for (const e of entries){
+      // Manejar <link href="">
       const ls = e.link ? (Array.isArray(e.link)? e.link : [e.link]) : [];
       for (const l of ls){
         const href = l?.href || l;
         const type = (l?.type || "").toLowerCase();
-        if (typeof href === "string" && (/\.xml($|\?)/i.test(href) || type.includes("xml") || type.includes("cap"))) links.add(href);
+        if (typeof href === "string" && (/\.xml($|\?)/i.test(href) || type.includes("xml") || type.includes("cap"))) {
+          links.add(href);
+        }
       }
       // A veces el CAP va en <id> o <content> con url
       if (typeof e.id === "string" && /\.xml($|\?)/i.test(e.id)) links.add(e.id);
@@ -162,7 +164,7 @@ function parseFeedForCapLinks(xml){
     }
   }
 
-  // RSS: rss.channel.item[].link/guid
+  // RSS
   const ch = obj?.rss?.channel;
   if (ch?.item){
     const items = Array.isArray(ch.item) ? ch.item : [ch.item];
