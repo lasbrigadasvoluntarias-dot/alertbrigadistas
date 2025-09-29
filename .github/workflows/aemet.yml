@@ -21,17 +21,19 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
 
-      # Instalar deps (NO usar npm ci)
       - run: npm install --no-audit --no-fund
 
-      # Generar ficheros
-      - run: npm run build:data
+      # Generar ficheros (si AEMET falla, los scripts escriben FeatureCollection vacía)
+      - run: node scripts/fetch_avisos.js
+      - run: node scripts/fetch_obs.js
 
-      # Preparar carpeta dist para Pages
       - run: mkdir -p dist && touch dist/.nojekyll && ls -l dist
 
-      # Publicar en GitHub Pages
       - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+      - uses: actions/deploy-pages@v4
+
         with:
           path: dist
       - uses: actions/deploy-pages@v4
