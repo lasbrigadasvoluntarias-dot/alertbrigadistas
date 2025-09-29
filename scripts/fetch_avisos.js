@@ -7,13 +7,11 @@ import { Agent } from "undici";
 
 const agent = new Agent({ connect: { family: 4, timeout: 20000 } });
 
-// UA de navegador para evitar filtros
 const HEADERS_XML = {
   "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
   "Accept": "application/atom+xml, application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5"
 };
 
-// Feeds directos y mirrors (fallback)
 const FEEDS_BASE = [
   "https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-atom-spain",
   "https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-rss-spain"
@@ -28,7 +26,7 @@ const OUT_DIR   = fileURLToPath(new URL("../dist/", import.meta.url));
 const OUT_FILE  = OUT_DIR + "avisos.geojson";
 const DIAG_FILE = OUT_DIR + "avisos_diag.json";
 const SHP_FILE  = fileURLToPath(new URL("../data/emma_es.geojson", import.meta.url));
-const CTR_FILE  = fileURLToPath(new URL("../data/emma_centroids.json", import.meta.url)); // <-- NUEVO
+const CTR_FILE  = fileURLToPath(new URL("../data/emma_centroids.json", import.meta.url));
 
 const uniq = arr => Array.from(new Set(arr));
 const asArray = x => Array.isArray(x)? x : (x==null? [] : [x]);
@@ -62,22 +60,21 @@ async function loadEmmaCentroids(){
     const m = new Map();
     for (const k of Object.keys(obj||{})){
       const v = obj[k];
-      if (Array.isArray(v) && v.length===2 && v.every(n => Number.isFinite(Number(n)))){
-        m.set(k.trim(), [Number(v[0]), Number(v[1])]);
+      if (Array.isArray(v) && v.length===2){
+        const lon = Number(v[0]), lat = Number(v[1]);
+        if (Number.isFinite(lon) && Number.isFinite(lat)) m.set(k.trim(), [lon,lat]);
       }
     }
-    return m; // puede estar vacío
+    return m;
   }catch{
-    return new Map(); // si no existe el archivo, seguimos sin centroids
+    return new Map(); // fichero no existe -> sin centróides
   }
 }
 
 // círculo aproximado en km → Polygon
-function circlePolygonFromKm(lon, lat, radiusKm = 20, steps = 64){
-  const R = 6371;
-  const rad = radiusKm / R;
-  const lat0 = lat * Math.PI/180;
-  const lon0 = lon * Math.PI/180;
+function circlePolygonFromKm(lon, lat, radiusKm = 60, steps = 64){
+  const R = 6371, rad = radiusKm / R;
+  const lat0 = lat * Math.PI/180, lon0 = lon * Math.PI/180;
   const ring = [];
   for (let i=0;i<=steps;i++){
     const brng = (2*Math.PI*i)/steps;
@@ -104,10 +101,7 @@ async function fetchAndParseFeed(){
     try{
       const res = await fetchText(u);
       attempts.push({
-        url: res.url,
-        status: res.status,
-        ok: res.ok,
-        contentType: res.ct,
+        url: res.url, status: res.status, ok: res.ok, contentType: res.ct,
         snippet: res.text.slice(0, 180).replace(/\s+/g, " ")
       });
       const looksXml = res.text.trim().startsWith("<");
@@ -168,18 +162,18 @@ async function main(){
     totalEntries: 0,
     joined: 0,
     missingShapes: [],
-    usedCircles: 0,          // <-- NUEVO
-    usedShapes: 0,           // <-- NUEVO
+    usedCircles: 0,
+    usedShapes: 0,
+    centroidsCount: 0,   // <-- NUEVO
     error: null,
     sampleProps: null
   };
 
   try{
-    // índices
     const emmaIndex = await loadEmmaShapes();
     const centroidIndex = await loadEmmaCentroids();
+    diag.centroidsCount = centroidIndex.size;
 
-    // feed
     const { obj, attempts } = await fetchAndParseFeed();
     diag.feedAttempts = attempts;
 
@@ -203,7 +197,6 @@ async function main(){
       if (seen.has(key)) continue;
       seen.add(key);
 
-      // 1) ¿tenemos shape?
       const geom = it.emma ? emmaIndex.get(it.emma) : null;
       if (geom){
         features.push({ type:"Feature", properties:{ ...it.props, EMMA_ID: it.emma, geometrySource:"shape" }, geometry: geom });
@@ -211,17 +204,15 @@ async function main(){
         continue;
       }
 
-      // 2) ¿tenemos centróide? → círculo de respaldo
       const ctr = it.emma ? centroidIndex.get(it.emma) : null;
       if (ctr){
         const [lon, lat] = ctr;
-        const poly = circlePolygonFromKm(lon, lat, 20 /* km */);
-        features.push({ type:"Feature", properties:{ ...it.props, EMMA_ID: it.emma, geometrySource:"centroid_circle", radiusKm:20 }, geometry: poly });
+        const poly = circlePolygonFromKm(lon, lat, 60); // 60 km para visibilidad
+        features.push({ type:"Feature", properties:{ ...it.props, EMMA_ID: it.emma, geometrySource:"centroid_circle", radiusKm:60 }, geometry: poly });
         diag.usedCircles++;
         continue;
       }
 
-      // 3) ni shape ni centróide: lo anotamos como faltante
       if (it.emma) missing.push(it.emma); else missing.push("NO_EMMA_ID");
     }
 
@@ -231,7 +222,7 @@ async function main(){
 
     await writeFile(OUT_FILE, JSON.stringify({ type:"FeatureCollection", features }));
     await writeFile(DIAG_FILE, JSON.stringify(diag, null, 2));
-    console.log(`Avisos: ${features.length} publicados (shapes=${diag.usedShapes}, círculos=${diag.usedCircles}). Faltan=${diag.missingShapes.length}`);
+    console.log(`Avisos: ${features.length} publicados (shapes=${diag.usedShapes}, círculos=${diag.usedCircles}, centroids=${diag.centroidsCount}). Faltan=${diag.missingShapes.length}`);
   }catch(err){
     diag.error = "fatal: " + (err?.message||String(err));
     await writeFile(OUT_FILE, JSON.stringify({ type:"FeatureCollection", features:[] }));
