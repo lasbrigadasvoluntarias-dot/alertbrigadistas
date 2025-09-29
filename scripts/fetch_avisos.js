@@ -7,16 +7,24 @@ import { Agent } from "undici";
 
 const agent = new Agent({ connect: { family: 4, timeout: 20000 } });
 
-// ⚠️ UA más “de navegador” para evitar filtros de bots
+// UA de navegador para evitar filtros
 const HEADERS_XML = {
   "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
   "Accept": "application/atom+xml, application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5"
 };
 
-const FEEDS = [
+// Feeds directos y mirrors de solo-lectura (si el CDN bloquea)
+const FEEDS_BASE = [
   "https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-atom-spain",
   "https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-rss-spain"
 ];
+function mirror(url) {
+  // r.jina.ai devuelve el HTML/XML como texto plano (sin cookies/JS)
+  // probamos con http y https por si una de las dos resuelve mejor
+  const http  = "https://r.jina.ai/http://"  + url.replace(/^https?:\/\//, "");
+  const https = "https://r.jina.ai/https://" + url.replace(/^https?:\/\//, "");
+  return [http, https];
+}
 
 const OUT_DIR   = fileURLToPath(new URL("../dist/", import.meta.url));
 const OUT_FILE  = OUT_DIR + "avisos.geojson";
@@ -25,6 +33,13 @@ const SHP_FILE  = fileURLToPath(new URL("../data/emma_es.geojson", import.meta.u
 
 const uniq = arr => Array.from(new Set(arr));
 const asArray = x => Array.isArray(x)? x : (x==null? [] : [x]);
+
+async function fetchText(url){
+  const r = await fetch(url, { dispatcher: agent, headers: HEADERS_XML, redirect: "follow" });
+  const text = await r.text();
+  const ct = r.headers.get("content-type") || "";
+  return { ok: r.ok, status: r.status, ct, text, url };
+}
 
 async function loadEmmaShapes(){
   const txt = await readFile(SHP_FILE, "utf-8");
@@ -41,26 +56,19 @@ async function loadEmmaShapes(){
   return idx;
 }
 
-async function fetchText(url){
-  const r = await fetch(url, { dispatcher: agent, headers: HEADERS_XML, redirect: "follow" });
-  const text = await r.text();
-  const ct = r.headers.get("content-type") || "";
-  return { ok: r.ok, status: r.status, ct, text, url };
-}
-
-// Intenta varias variantes y devuelve {obj, diagAttempts: [...]}
+// intentar varias URL (directo, con cache-busting y mirrors)
 async function fetchAndParseFeed(){
   const attempts = [];
-  const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:"", removeNSPrefix:true });
+  const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:"", removeNSPrefix:true, allowBooleanAttributes:true });
 
-  // lista de intentos (con cache-busting)
-  const tries = [];
-  for (const base of FEEDS) {
-    tries.push(base);
-    tries.push(base + "?_=" + Date.now());
+  const urls = [];
+  for (const base of FEEDS_BASE){
+    urls.push(base);
+    urls.push(base + "?_=" + Date.now());
+    urls.push(...mirror(base));
   }
 
-  for (const u of tries){
+  for (const u of urls){
     try{
       const res = await fetchText(u);
       attempts.push({
@@ -68,12 +76,14 @@ async function fetchAndParseFeed(){
         status: res.status,
         ok: res.ok,
         contentType: res.ct,
-        snippet: res.text.slice(0, 200).replace(/\s+/g, " ")
+        snippet: res.text.slice(0, 180).replace(/\s+/g, " ")
       });
-      // comprobación mínima: que empiece por '<' y contenga <feed o <rss
+      // Aceptamos contenido aunque el content-type no diga xml, mientras empiece por "<"
       const looksXml = res.text.trim().startsWith("<");
-      if (!res.ok || !looksXml) continue;
-      const obj = parser.parse(res.text);
+      if (!looksXml) continue;
+
+      let obj;
+      try { obj = parser.parse(res.text); } catch { obj = null; }
       const hasEntries = (obj?.feed?.entry) || (obj?.rss?.channel?.item);
       if (hasEntries) return { obj, attempts };
     }catch(e){
@@ -84,12 +94,10 @@ async function fetchAndParseFeed(){
 }
 
 function extractEntries(feedObj){
-  // Atom
   if (feedObj?.feed?.entry){
     const entries = asArray(feedObj.feed.entry);
     return entries.map(e => ({ e, isAtom: true }));
   }
-  // RSS
   if (feedObj?.rss?.channel?.item){
     const items = asArray(feedObj.rss.channel.item);
     return items.map(e => ({ e, isAtom: false }));
@@ -97,20 +105,20 @@ function extractEntries(feedObj){
   return [];
 }
 
-// Extrae EMMA_ID y metadatos mínimos desde Atom/RSS
+// Extraer EMMA_ID y metadatos mínimos (namespaces ya removidos)
 function mapEntryToAlert(entryWrap){
   const { e, isAtom } = entryWrap;
 
-  // geocode en Atom (namespaces ya removidos)
+  // EMMA_ID
   let emma = null;
-  const geos = asArray(e?.geocode);
+  const geos = asArray(e?.geocode); // porque removeNSPrefix:true → <cap:geocode> → geocode
   for (const g of geos){
     const vn = (g?.valueName || g?.valuename || "").toUpperCase();
     const vv = g?.value || g?.val || "";
     if (vn === "EMMA_ID" && typeof vv === "string") { emma = vv.trim(); break; }
   }
 
-  // campos comunes
+  // campos
   const areaDesc = e?.areaDesc || null;
   const event    = e?.event || null;
   const severity = e?.severity || null;
@@ -140,7 +148,7 @@ async function main(){
       return;
     }
 
-    // 2) feed (con diagnóstico detallado)
+    // 2) feed (con mirrors y diagnóstico)
     const { obj, attempts } = await fetchAndParseFeed();
     diag.feedAttempts = attempts;
 
@@ -157,9 +165,9 @@ async function main(){
       return;
     }
 
-    // 3) entries → alerts
+    // 3) entries → alerts → join EMMA
     const rawEntries = extractEntries(obj);
-    const alerts = rawEntries.map(mapEntryToAlert).filter(a => a);
+    const alerts = rawEntries.map(mapEntryToAlert).filter(Boolean);
     diag.totalEntries = alerts.length;
 
     const features = [];
@@ -196,3 +204,4 @@ async function main(){
 }
 
 main().catch(e=>{ console.error(e); });
+
