@@ -7,6 +7,7 @@
     "build:data": "node scripts/fetch_avisos.js && node scripts/fetch_obs.js"
   },
   "dependencies": {
-    "fast-xml-parser": "^4.4.1"
+    "fast-xml-parser": "^4.4.1",
+    "undici": "^6.19.8"
   }
 }
