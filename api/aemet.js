@@ -7,17 +7,34 @@ function toFloat(x){ const n = parseFloat(x); return Number.isFinite(n) ? n : nu
 
 // Convierte string CAP <polygon> "lat lon lat lon ..." -> anillo GeoJSON [ [lon,lat], ... ]
 function parsePolygonString(polyStr){
-  const tokens = String(polyStr).trim().split(/[\s]+/);
+  const text = String(polyStr || "").trim();
+  if (!text) return null;
+
   const coords = [];
-  for (let i=0; i<tokens.length; i+=2){
-    const lat = toFloat(tokens[i]);
-    const lon = toFloat(tokens[i+1]);
-    if (lat==null || lon==null) continue;
-    coords.push([lon, lat]);
+
+  if (text.includes(",")) {
+    // Formato CAP más común: "lat,lon lat,lon ..."
+    const pairs = text.split(/\s+/);
+    for (const pair of pairs) {
+      const [latStr, lonStr] = pair.split(",");
+      const lat = parseFloat(latStr);
+      const lon = parseFloat(lonStr);
+      if (Number.isFinite(lat) && Number.isFinite(lon)) coords.push([lon, lat]); // GeoJSON => [lon,lat]
+    }
+  } else {
+    // Alternativa: "lat lon lat lon ..."
+    const vals = text.split(/\s+/).map(v => parseFloat(v)).filter(Number.isFinite);
+    for (let i = 0; i + 1 < vals.length; i += 2) {
+      const lat = vals[i], lon = vals[i + 1];
+      coords.push([lon, lat]);
+    }
   }
+
+  // Cierra el anillo si hace falta
   if (coords.length && (coords[0][0] !== coords.at(-1)[0] || coords[0][1] !== coords.at(-1)[1])) {
     coords.push(coords[0]);
   }
+
   return coords.length >= 4 ? coords : null;
 }
 
