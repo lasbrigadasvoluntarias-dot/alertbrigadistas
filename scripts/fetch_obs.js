@@ -1,23 +1,44 @@
 import { writeFile, mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { Agent } from "undici";
 
 const AEMET_KEY = process.env.AEMET_API_KEY;
 if (!AEMET_KEY) { console.error("Falta AEMET_API_KEY"); process.exit(1); }
 
-async function main(){
-  const step1 = await fetch(`https://opendata.aemet.es/opendata/api/observacion/convencional/todas?api_key=${encodeURIComponent(AEMET_KEY)}`);
-  const j = await step1.json();
-  if (!j?.datos) throw new Error("Sin datos en descriptor OBS");
+const agent = new Agent({ connect: { family: 4, timeout: 15000 } });
+const UA = { "User-Agent": "alertbrigadistas/1.0 (+github actions)" };
 
-  // descarga datos (JSON) con reintento ?api_key
-  let r = await fetch(j.datos);
-  let txt = await r.text();
-  if (!r.ok || !txt.trim().startsWith("[")) {
-    const sep = j.datos.includes("?") ? "&" : "?";
-    r = await fetch(j.datos + `${sep}api_key=${encodeURIComponent(AEMET_KEY)}`);
-    txt = await r.text();
+async function main(){
+  // Paso 1: descriptor
+  let r1, txt1;
+  try {
+    r1 = await fetch(`https://opendata.aemet.es/opendata/api/observacion/convencional/todas?api_key=${encodeURIComponent(AEMET_KEY)}`, { dispatcher: agent, headers: { ...UA, "Accept":"application/json" }});
+    txt1 = await r1.text();
+  } catch (e) {
+    console.error("OBS STEP1 fetch failed:", e?.code||e?.message||e);
   }
-  const arr = JSON.parse(txt);
+  let j;
+  try { j = JSON.parse(txt1||""); } catch { j = null; }
+  const outDir = fileURLToPath(new URL("../dist/", import.meta.url));
+  await mkdir(outDir, { recursive: true });
+
+  if (!j?.datos){
+    // publicar vacío para no romper
+    await writeFile(outDir + "obs.geojson", JSON.stringify({ type:"FeatureCollection", features:[] }));
+    console.log("Obs: publicado vacío (sin descriptor)");
+    return;
+  }
+
+  // Paso 2: datos
+  const hJSON = { ...UA, "Accept":"application/json" };
+  let r2 = await fetch(j.datos, { dispatcher: agent, headers: hJSON });
+  let txt2 = await r2.text();
+  if (!r2.ok || !txt2.trim().startsWith("[")){
+    const sep = j.datos.includes("?") ? "&" : "?";
+    r2 = await fetch(j.datos + `${sep}api_key=${encodeURIComponent(AEMET_KEY)}`, { dispatcher: agent, headers: hJSON });
+    txt2 = await r2.text();
+  }
+  let arr; try { arr = JSON.parse(txt2); } catch { arr = []; }
 
   const feats=[];
   for (const it of arr){
@@ -32,11 +53,9 @@ async function main(){
       geometry:{ type:"Point", coordinates:[lon,lat] }
     });
   }
-  const geo = { type:"FeatureCollection", features:feats };
 
-  const outDir = fileURLToPath(new URL("../dist/", import.meta.url));
-  await mkdir(outDir, { recursive: true });
-  await writeFile(outDir + "obs.geojson", JSON.stringify(geo));
+  await writeFile(outDir + "obs.geojson", JSON.stringify({ type:"FeatureCollection", features:feats }));
   console.log("Escrito dist/obs.geojson con", feats.length, "estaciones");
 }
-main().catch(e=>{ console.error(e); process.exit(1); });
+main().catch(e=>{ console.error(e); process.exit(0); /* no romper deploy */ });
+
