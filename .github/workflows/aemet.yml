@@ -43,7 +43,23 @@ jobs:
       # necesario para que Pages publique también ficheros sin extensión .html
       - run: mkdir -p dist && touch dist/.nojekyll
 
+
+      - name: Descargar y extraer avisos AEMET (tar.gz)
+        run: |
+          mkdir -p dist aemet_tmp
+          curl -L "https://www.aemet.es/es/geojson/download/avisos/geojson_1759165200.tar.gz" -o aemet.tar.gz
+          tar -xzf aemet.tar.gz -C aemet_tmp
+          echo "Ficheros descargados:" && find aemet_tmp -type f -name '*.geojson' -maxdepth 2
+
+      - name: Unir avisos AEMET a un solo GeoJSON
+        run: |
+          jq -s '{type:"FeatureCollection",features: map(.features) | add}' aemet_tmp/**/*.geojson > dist/avisos_aemet.geojson
+          jq -c . dist/avisos_aemet.geojson > dist/avisos_aemet.min.geojson && mv dist/avisos_aemet.min.geojson dist/avisos_aemet.geojson
+          jq '.features|length as $n | {features:$n, sample:(.[0]|.properties)}' dist/avisos_aemet.geojson > dist/avisos_aemet_diag.json
+
+
       # subir artefacto a GitHub Pages
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
