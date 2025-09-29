@@ -2,7 +2,7 @@ name: AEMET mirror
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/10 * * * *"   # cada 10 minutos
   workflow_dispatch:
   push:
     branches: [ main ]
@@ -23,7 +23,6 @@ jobs:
 
       - run: npm install --no-audit --no-fund
 
-      # Generar ficheros (si AEMET falla, los scripts escriben FeatureCollection vacía)
       - run: node scripts/fetch_avisos.js
       - run: node scripts/fetch_obs.js
 
@@ -34,7 +33,4 @@ jobs:
           path: dist
       - uses: actions/deploy-pages@v4
 
-        with:
-          path: dist
-      - uses: actions/deploy-pages@v4
 
