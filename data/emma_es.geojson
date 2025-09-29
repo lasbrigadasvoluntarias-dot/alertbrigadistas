@@ -1,0 +1,10 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type":"Feature",
+      "properties":{"EMMA_ID":"ES239","name":"Litoral norte de Alicante"},
+      "geometry":{"type":"Polygon","coordinates":[[ [lon,lat], ... ]]}
+    }
+  ]
+}
