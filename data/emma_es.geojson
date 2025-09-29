@@ -3,8 +3,33 @@
   "features": [
     {
       "type":"Feature",
+      "properties":{"EMMA_ID":"ES084","name":"Costa granadina"},
+      "geometry":{
+        "type":"Polygon",
+        "coordinates":[[
+          [-3.9,36.74],[-2.9,36.74],[-2.9,36.46],[-3.9,36.46],[-3.9,36.74]
+        ]]
+      }
+    },
+    {
+      "type":"Feature",
       "properties":{"EMMA_ID":"ES239","name":"Litoral norte de Alicante"},
-      "geometry":{"type":"Polygon","coordinates":[[ [lon,lat], ... ]]}
+      "geometry":{
+        "type":"Polygon",
+        "coordinates":[[
+          [-0.25,38.95],[0.15,38.95],[0.15,38.50],[-0.25,38.50],[-0.25,38.95]
+        ]]
+      }
+    },
+    {
+      "type":"Feature",
+      "properties":{"EMMA_ID":"ES249","name":"Litoral sur de Valencia"},
+      "geometry":{
+        "type":"Polygon",
+        "coordinates":[[
+          [-0.8,39.5],[-0.2,39.5],[-0.2,38.9],[-0.8,38.9],[-0.8,39.5]
+        ]]
+      }
     }
   ]
 }
