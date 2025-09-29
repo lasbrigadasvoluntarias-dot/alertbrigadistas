@@ -2,9 +2,11 @@
   "name": "alertbrigadistas",
   "version": "1.0.0",
   "private": true,
-  "engines": { "node": ">=18" },
+  "type": "module",
+  "scripts": {
+    "build:data": "node scripts/fetch_avisos.js && node scripts/fetch_obs.js"
+  },
   "dependencies": {
-    "fast-xml-parser": "^4.4.1",
-    "undici": "^6.19.8"
+    "fast-xml-parser": "^4.4.1"
   }
 }
