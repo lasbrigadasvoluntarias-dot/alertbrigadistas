@@ -16,6 +16,7 @@ jobs:
       id-token: write
     env:
       AEMET_API_KEY: ${{ secrets.AEMET_API_KEY }}
+      METEOALARM_TOKEN: ${{ secrets.METEOALARM_TOKEN }}  # <-- NUEVO
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -32,5 +33,6 @@ jobs:
         with:
           path: dist
       - uses: actions/deploy-pages@v4
+
 
 
