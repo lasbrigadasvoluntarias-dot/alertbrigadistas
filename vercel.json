@@ -1,6 +1,6 @@
 {
-  "regions": ["fra1", "cdg1"],
   "functions": {
-    "api/**/*.js": { "maxDuration": 10 }
-  }
+    "api/**/*.js": { "runtime": "nodejs18.x", "maxDuration": 10 }
+  },
+  "regions": ["cdg1", "fra1"]
 }
