@@ -13,14 +13,12 @@ const HEADERS_XML = {
   "Accept": "application/atom+xml, application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5"
 };
 
-// Feeds directos y mirrors de solo-lectura (si el CDN bloquea)
+// Feeds directos y mirrors
 const FEEDS_BASE = [
   "https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-atom-spain",
   "https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-rss-spain"
 ];
 function mirror(url) {
-  // r.jina.ai devuelve el HTML/XML como texto plano (sin cookies/JS)
-  // probamos con http y https por si una de las dos resuelve mejor
   const http  = "https://r.jina.ai/http://"  + url.replace(/^https?:\/\//, "");
   const https = "https://r.jina.ai/https://" + url.replace(/^https?:\/\//, "");
   return [http, https];
@@ -56,10 +54,10 @@ async function loadEmmaShapes(){
   return idx;
 }
 
-// intentar varias URL (directo, con cache-busting y mirrors)
+// intenta varios (directo, cache-busting y mirrors)
 async function fetchAndParseFeed(){
   const attempts = [];
-  const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:"", removeNSPrefix:true, allowBooleanAttributes:true });
+  const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:"", removeNSPrefix:true });
 
   const urls = [];
   for (const base of FEEDS_BASE){
@@ -78,7 +76,6 @@ async function fetchAndParseFeed(){
         contentType: res.ct,
         snippet: res.text.slice(0, 180).replace(/\s+/g, " ")
       });
-      // Aceptamos contenido aunque el content-type no diga xml, mientras empiece por "<"
       const looksXml = res.text.trim().startsWith("<");
       if (!looksXml) continue;
 
@@ -105,20 +102,18 @@ function extractEntries(feedObj){
   return [];
 }
 
-// Extraer EMMA_ID y metadatos mínimos (namespaces ya removidos)
+// Extraer EMMA_ID y metadatos
 function mapEntryToAlert(entryWrap){
   const { e, isAtom } = entryWrap;
 
-  // EMMA_ID
   let emma = null;
-  const geos = asArray(e?.geocode); // porque removeNSPrefix:true → <cap:geocode> → geocode
+  const geos = asArray(e?.geocode);
   for (const g of geos){
     const vn = (g?.valueName || g?.valuename || "").toUpperCase();
     const vv = g?.value || g?.val || "";
     if (vn === "EMMA_ID" && typeof vv === "string") { emma = vv.trim(); break; }
   }
 
-  // campos
   const areaDesc = e?.areaDesc || null;
   const event    = e?.event || null;
   const severity = e?.severity || null;
@@ -138,34 +133,18 @@ async function main(){
   const diag = { feedAttempts: [], totalEntries:0, joined:0, missingShapes:[], error:null, sampleProps:null };
 
   try{
-    // 1) shapes
-    let emmaIndex;
-    try { emmaIndex = await loadEmmaShapes(); }
-    catch(e){
-      diag.error = "shapes: " + (e?.message||String(e));
-      await writeFile(OUT_FILE, JSON.stringify({ type:"FeatureCollection", features:[] }));
-      await writeFile(DIAG_FILE, JSON.stringify(diag, null, 2));
-      return;
-    }
+    const emmaIndex = await loadEmmaShapes();
 
-    // 2) feed (con mirrors y diagnóstico)
     const { obj, attempts } = await fetchAndParseFeed();
     diag.feedAttempts = attempts;
 
     if (!obj){
       diag.error = "feed: imposible obtener Atom/RSS válido";
-      // conserva último o vacío
-      try{
-        const prev = await readFile(OUT_FILE, "utf-8");
-        await writeFile(OUT_FILE, prev);
-      }catch{
-        await writeFile(OUT_FILE, JSON.stringify({ type:"FeatureCollection", features:[] }));
-      }
+      await writeFile(OUT_FILE, JSON.stringify({ type:"FeatureCollection", features:[] }));
       await writeFile(DIAG_FILE, JSON.stringify(diag, null, 2));
       return;
     }
 
-    // 3) entries → alerts → join EMMA
     const rawEntries = extractEntries(obj);
     const alerts = rawEntries.map(mapEntryToAlert).filter(Boolean);
     diag.totalEntries = alerts.length;
@@ -193,15 +172,11 @@ async function main(){
     console.log(`Avisos: ${features.length} features publicadas. EMMA sin shape: ${diag.missingShapes.length}`);
   }catch(err){
     diag.error = "fatal: " + (err?.message||String(err));
-    try{
-      const prev = await readFile(OUT_FILE, "utf-8");
-      await writeFile(OUT_FILE, prev);
-    }catch{
-      await writeFile(OUT_FILE, JSON.stringify({ type:"FeatureCollection", features:[] }));
-    }
+    await writeFile(OUT_FILE, JSON.stringify({ type:"FeatureCollection", features:[] }));
     await writeFile(DIAG_FILE, JSON.stringify(diag, null, 2));
   }
 }
 
 main().catch(e=>{ console.error(e); });
+
 
