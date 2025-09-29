@@ -2,7 +2,7 @@ name: AEMET mirror
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # cada 10 minutos
+    - cron: "*/10 * * * *"
   workflow_dispatch:
   push:
     branches: [ main ]
@@ -20,9 +20,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
-      - run: npm ci
+
+      # Instalar deps (NO usar npm ci)
+      - run: npm install --no-audit --no-fund
+
+      # Generar ficheros
       - run: npm run build:data
+
+      # Preparar carpeta dist para Pages
+      - run: mkdir -p dist && touch dist/.nojekyll && ls -l dist
+
+      # Publicar en GitHub Pages
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
       - uses: actions/deploy-pages@v4
+
