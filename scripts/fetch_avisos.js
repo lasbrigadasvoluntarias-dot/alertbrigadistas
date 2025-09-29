@@ -6,23 +6,21 @@ import { XMLParser } from "fast-xml-parser";
 import { Agent } from "undici";
 
 const AEMET_KEY = process.env.AEMET_API_KEY || "";
-const agent = new Agent({ connect: { family: 4, timeout: 15000 } }); // fuerza IPv4
+const agent = new Agent({ connect: { family: 4, timeout: 15000 } });
 const UA_JSON = { "User-Agent": "alertbrigadistas/1.0 (+github actions)", "Accept": "application/json" };
 const UA_XML  = { "User-Agent": "alertbrigadistas/1.0 (+github actions)", "Accept": "application/xml, text/xml" };
 
-// AEMET (preferente)
 const AEMET_DESC_URLS = [
   "https://opendata.aemet.es/opendata/api/avisos_cap/ultimaelaboracion/area/esp",
   "https://opendata.aemet.es/opendata/api/avisos_cap/ultimaelaboracion?area=esp"
 ];
 
-// Meteoalarm (respaldo España)
 const METEOALARM_FEEDS = [
   "https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-atom-spain",
   "https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-rss-spain"
 ];
 
-// ---------- utilidades ----------
+// ---------- util ----------
 const toNum = (x)=>{ const n=parseFloat(x); return Number.isFinite(n)?n:null; };
 function parsePolygonString(polyStr){
   const t=String(polyStr||"").trim(); if(!t) return null;
@@ -34,7 +32,7 @@ function parsePolygonString(polyStr){
     const vals=t.split(/[;\s]+/).map(toNum).filter(v=>v!=null);
     for(let i=0;i+1<vals.length;i+=2) coords.push([vals[i+1], vals[i]]);
   }
-  if(coords.length && (coords[0][0]!==coords.at(-1)[0] || coords[0][1]!==coords.at(-1)[1])) coords.push(coords[0]);
+  if(coords.length&&(coords[0][0]!==coords.at(-1)[0]||coords[0][1]!==coords.at(-1)[1])) coords.push(coords[0]);
   return coords.length>=4 ? coords : null;
 }
 function parseCircleString(circleStr){
@@ -51,9 +49,9 @@ function parseCircleString(circleStr){
   }
   return ring;
 }
-function mapSeverityFromEventCode(info){
+function mapSeverity(info){
   let sev=info?.severity||"";
-  const ecs = Array.isArray(info?.eventCode) ? info.eventCode : (info?.eventCode ? [info.eventCode] : []);
+  const ecs = Array.isArray(info?.eventCode) ? info.eventCode : (info?.eventCode ? [info?.eventCode] : []);
   for (const c of ecs){
     const name=(c?.valueName||"").toLowerCase(), val=(c?.value||"").toLowerCase();
     if (name.includes("awareness_level")){
@@ -72,7 +70,7 @@ function capToGeoJSON(cap){
     const infos = Array.isArray(alert?.info) ? alert.info : (alert?.info ? [alert.info] : []);
     for (const info of infos){
       const { event, headline, description, instruction, urgency, certainty, effective, onset, expires } = info || {};
-      const severity = mapSeverityFromEventCode(info) || info?.severity || "";
+      const severity = mapSeverity(info) || info?.severity || "";
       const areas = Array.isArray(info?.area) ? info.area : (info?.area ? [info.area] : []);
       for (const a of areas){
         const props = { ...base, event, headline, description, instruction, urgency, severity, certainty, effective, onset, expires, areaDesc: a?.areaDesc || null };
@@ -86,18 +84,16 @@ function capToGeoJSON(cap){
   return { type:"FeatureCollection", features };
 }
 
-// ---------- helpers fetch ----------
 async function fetchText(url, headers){
   const r = await fetch(url, { dispatcher: agent, headers });
   const t = await r.text();
   return { ok:r.ok, status:r.status, text:t, url };
 }
 
-// 1) AEMET (preferente)
+// AEMET primero
 async function getAemetCAPXml(){
   if (!AEMET_KEY) return null;
   for (const base of AEMET_DESC_URLS){
-    // a) api_key en cabecera
     try{
       let {ok,text} = await fetchText(base, { ...UA_JSON, "api_key": AEMET_KEY });
       if (ok){
@@ -114,7 +110,6 @@ async function getAemetCAPXml(){
         }catch{}
       }
     }catch{}
-    // b) api_key en query
     try{
       const sep = base.includes("?") ? "&" : "?";
       let {ok,text} = await fetchText(base + `${sep}api_key=${encodeURIComponent(AEMET_KEY)}`, UA_JSON);
@@ -136,17 +131,15 @@ async function getAemetCAPXml(){
   return null;
 }
 
-// 2) Meteoalarm (respaldo): Atom/RSS → lista de URLs CAP
+// Meteoalarm: extraer URLs CAP del Atom/RSS
 function parseFeedForCapLinks(xml){
   const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:"", removeNSPrefix:true });
   const obj = parser.parse(xml||"");
   const links = new Set();
 
-  // Atom
   if (obj?.feed?.entry){
     const entries = Array.isArray(obj.feed.entry)? obj.feed.entry: [obj.feed.entry];
     for (const e of entries){
-      // <link href="..." type="application/cap+xml" ... />
       const ls = e.link ? (Array.isArray(e.link)? e.link : [e.link]) : [];
       for (const l of ls){
         const href = l?.href || l;
@@ -156,16 +149,12 @@ function parseFeedForCapLinks(xml){
           else if (/\.xml($|\?)/i.test(href)) links.add(href);
         }
       }
-      // <id> a veces es una URL CAP con query
       if (typeof e.id === "string" && (e.id.includes("application/cap") || /\.xml($|\?)/i.test(e.id))) links.add(e.id);
-      // <content> puede contener url
       const c = e.content;
       if (typeof c === "string" && /^https?:\/\//.test(c) && (/\.xml($|\?)/i.test(c) || c.includes("application/cap"))) links.add(c);
       if (c?.url && (/\.xml($|\?)/i.test(c.url) || String(c.url).includes("application/cap"))) links.add(c.url);
     }
   }
-
-  // RSS
   const ch = obj?.rss?.channel;
   if (ch?.item){
     const items = Array.isArray(ch.item) ? ch.item : [ch.item];
@@ -175,17 +164,16 @@ function parseFeedForCapLinks(xml){
       if (it.guid?.["#text"] && (/\.xml($|\?)/i.test(it.guid["#text"]) || String(it.guid["#text"]).includes("application/cap"))) links.add(it.guid["#text"]);
     }
   }
-
   return Array.from(links);
 }
 
-async function fetchMeteoalarmCAPs(){
+async function fetchMeteoalarmCAPs(diag){
   for (const feedUrl of METEOALARM_FEEDS){
     try{
       const {ok, text, status} = await fetchText(feedUrl, { ...UA_XML, "Accept": "application/atom+xml, application/rss+xml, application/xml, text/xml" });
-      if (!ok) { console.warn("Meteoalarm feed no OK", feedUrl, status); continue; }
+      if (!ok) { diag.feeds.push({feedUrl,status,ok}); continue; }
       const capLinks = parseFeedForCapLinks(text);
-      console.log("Meteoalarm:", feedUrl, "→ links CAP:", capLinks.length);
+      diag.feeds.push({feedUrl,status,ok, capLinks: capLinks.length});
       if (!capLinks.length) continue;
 
       const xmls = [];
@@ -201,29 +189,47 @@ async function fetchMeteoalarmCAPs(){
         }));
         for (const x of got) if (x) xmls.push(x);
       }
-      console.log("Meteoalarm: CAP descargados:", xmls.length);
+      diag.capDownloaded += xmls.length;
       if (xmls.length) return xmls;
     }catch(e){
-      console.warn("Meteoalarm feed error", feedUrl, e?.message||e);
+      diag.feeds.push({feedUrl,error: e?.message||String(e)});
     }
   }
   return [];
 }
 
-// Combinar varios CAP en un solo GeoJSON
-function capXmlArrayToGeoJSON(xmlArr){
+function capXmlArrayToGeoJSON(xmlArr, diag){
   const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:"", removeNSPrefix:true });
   const features = [];
   const seen = new Set();
-  for (const xml of xmlArr){
+  let withPoly=0, withCircle=0;
+
+  for (let k=0; k<xmlArr.length; k++){
+    const xml = xmlArr[k];
     let cap;
     try { cap = parser.parse(xml); } catch { continue; }
-    const coll = capToGeoJSON(cap);
-    for (const f of coll.features){
+    const alerts = Array.isArray(cap.alert) ? cap.alert : (cap.alert ? [cap.alert] : []);
+    for (const alert of alerts){
+      const infos = Array.isArray(alert?.info) ? alert.info : (alert?.info ? [alert.info] : []);
+      for (const info of infos){
+        const areas = Array.isArray(info?.area) ? info.area : (info?.area ? [info.area] : []);
+        for (const a of areas){
+          const polys = a?.polygon ? (Array.isArray(a.polygon) ? a.polygon : [a.polygon]) : [];
+          const circles = a?.circle ? (Array.isArray(a.circle) ? a.circle : [a.circle]) : [];
+          if (polys.length) withPoly++;
+          if (circles.length) withCircle++;
+        }
+      }
+    }
+    const g = capToGeoJSON(cap);
+    for (const f of g.features){
       const id = (f.properties?.identifier || "") + "|" + (f.properties?.onset || "") + "|" + (f.properties?.expires || "");
       if (!seen.has(id)){ seen.add(id); features.push(f); }
     }
+    if (k<2) diag.samples.push(xml.slice(0,2000)); // guarda 2 muestras truncadas
   }
+  diag.withPoly = withPoly;
+  diag.withCircle = withCircle;
   return { type:"FeatureCollection", features };
 }
 
@@ -232,6 +238,9 @@ async function main(){
   const outDir = fileURLToPath(new URL("../dist/", import.meta.url));
   await mkdir(outDir, { recursive: true });
   const outFile = outDir + "avisos.geojson";
+  const diagFile = outDir + "avisos_diag.json";
+
+  const diag = { feeds: [], capDownloaded: 0, withPoly: 0, withCircle: 0, features: 0, samples: [] };
 
   let geo = null;
 
@@ -244,24 +253,24 @@ async function main(){
       const g = capToGeoJSON(cap);
       if ((g.features||[]).length){
         geo = g;
-        console.log("AEMET: features:", g.features.length);
       }
     }
-  }catch(e){ console.warn("AEMET fallo", e?.message||e); }
+  }catch{}
 
   // 2) Meteoalarm
   if (!geo){
-    try{
-      const xmlArr = await fetchMeteoalarmCAPs();
-      if (xmlArr.length){
-        const g = capXmlArrayToGeoJSON(xmlArr);
-        console.log("Meteoalarm: features:", g.features.length);
-        if ((g.features||[]).length) geo = g;
-      }
-    }catch(e){ console.warn("Meteoalarm fallo", e?.message||e); }
+    const xmlArr = await fetchMeteoalarmCAPs(diag);
+    if (xmlArr.length){
+      const g = capXmlArrayToGeoJSON(xmlArr, diag);
+      if ((g.features||[]).length) geo = g;
+      diag.features = g.features?.length || 0;
+    }
   }
 
-  // 3) Escribir
+  // escribir diag SIEMPRE
+  await writeFile(diagFile, JSON.stringify(diag, null, 2));
+
+  // 3) Escribir GeoJSON (válido, o conservar último, o vacío)
   if (geo && (geo.features||[]).length){
     await writeFile(outFile, JSON.stringify(geo));
     console.log("Avisos: publicado con", geo.features.length, "features");
@@ -269,7 +278,7 @@ async function main(){
     try {
       const prev = await readFile(outFile, "utf-8");
       await writeFile(outFile, prev);
-      console.warn("Avisos: sin fuente válida; se conserva el último fichero");
+      console.warn("Avisos: sin geometría; se conserva el último fichero");
     } catch {
       await writeFile(outFile, JSON.stringify({ type:"FeatureCollection", features:[] }));
       console.warn("Avisos: sin fuente y sin anterior; publicado vacío");
