@@ -43,12 +43,6 @@ jobs:
       # necesario para que Pages publique también ficheros sin extensión .html
       - run: mkdir -p dist && touch dist/.nojekyll
 
-       - run: |
-          echo "=== CHECK centroids ==="
-          test -f data/emma_centroids.json && echo "OK centroids" || echo "NO centroids"
-          head -n 20 data/emma_centroids.json || true
-
-
       # subir artefacto a GitHub Pages
       - uses: actions/upload-pages-artifact@v3
         with:
