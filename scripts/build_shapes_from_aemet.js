@@ -1,8 +1,9 @@
 // scripts/build_shapes_from_aemet.js
+// Construye data/emma_es.geojson a partir de los geojson extraídos del TAR de AEMET
 import { readFile, writeFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
-const SRC_DIR = "aemet_tmp";           // carpeta donde extrajiste el tar
+const SRC_DIR = "aemet_tmp";           // donde extrajiste el tar con el workflow
 const OUT     = "data/emma_es.geojson";
 
 function norm(s){
@@ -42,7 +43,7 @@ for (const {name, geom} of feat){
   if (!idx.has(key)) idx.set(key, { EMMA_ID: null, name, geometry: geom });
 }
 
-// exporta como FeatureCollection
+// exporta como FeatureCollection (sin EMMA_ID asignado de momento)
 const fc = { type:"FeatureCollection", features: [] };
 for (const v of idx.values()){
   fc.features.push({ type:"Feature", properties:{ EMMA_ID: v.EMMA_ID, name: v.name }, geometry: v.geometry });
