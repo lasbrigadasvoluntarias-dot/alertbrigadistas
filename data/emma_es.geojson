@@ -4,42 +4,22 @@
     {
       "type":"Feature",
       "properties":{"EMMA_ID":"ES084","name":"Costa granadina"},
-      "geometry":{
-        "type":"Polygon",
-        "coordinates":[[
-          [-3.90,36.74],[-2.90,36.74],[-2.90,36.46],[-3.90,36.46],[-3.90,36.74]
-        ]]
-      }
+      "geometry":{"type":"Polygon","coordinates":[[[-3.90,36.74],[-2.90,36.74],[-2.90,36.46],[-3.90,36.46],[-3.90,36.74]]]}
     },
     {
       "type":"Feature",
       "properties":{"EMMA_ID":"ES239","name":"Litoral norte de Alicante"},
-      "geometry":{
-        "type":"Polygon",
-        "coordinates":[[
-          [-0.25,38.95],[0.15,38.95],[0.15,38.50],[-0.25,38.50],[-0.25,38.95]
-        ]]
-      }
+      "geometry":{"type":"Polygon","coordinates":[[[-0.25,38.95],[0.15,38.95],[0.15,38.50],[-0.25,38.50],[-0.25,38.95]]]}
     },
     {
       "type":"Feature",
       "properties":{"EMMA_ID":"ES249","name":"Litoral sur de Valencia"},
-      "geometry":{
-        "type":"Polygon",
-        "coordinates":[[
-          [-0.80,39.50],[-0.20,39.50],[-0.20,38.90],[-0.80,38.90],[-0.80,39.50]
-        ]]
-      }
+      "geometry":{"type":"Polygon","coordinates":[[[-0.80,39.50],[-0.20,39.50],[-0.20,38.90],[-0.80,38.90],[-0.80,39.50]]]}
     },
     {
       "type":"Feature",
       "properties":{"EMMA_ID":"ES241","name":"Litoral sur de Alicante"},
-      "geometry":{
-        "type":"Polygon",
-        "coordinates":[[
-          [-0.85,38.75],[-0.05,38.75],[-0.05,38.00],[-0.85,38.00],[-0.85,38.75]
-        ]]
-      }
+      "geometry":{"type":"Polygon","coordinates":[[[-0.85,38.75],[-0.05,38.75],[-0.05,38.00],[-0.85,38.00],[-0.85,38.75]]]}
     }
   ]
 }
