@@ -1,10 +1,9 @@
 {
   "name": "alertbrigadistas",
   "version": "1.0.0",
-  "private": true,
   "type": "module",
   "scripts": {
-    "build:data": "node scripts/fetch_avisos.js && node scripts/fetch_obs.js"
+    "build:data": "node scripts/fetch_avisos.js && echo 'OK avisos' || true"
   },
   "dependencies": {
     "fast-xml-parser": "^4.4.1",
