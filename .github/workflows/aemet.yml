@@ -1,71 +1,95 @@
-name: AEMET mirror
+name: AEMET + Meteoalarm → Pages
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # cada 10 minutos
+    - cron: "*/10 * * * *"     # cada 10 minutos
   workflow_dispatch:
-  push:
-    branches: [ main ]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
 
 jobs:
-  build-and-deploy:
+  build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-    env:
-      AEMET_API_KEY: ${{ secrets.AEMET_API_KEY }}
-
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      # instala dependencias
-      - run: npm install --no-audit --no-fund
+      - name: Instalar dependencias (si hay lockfile)
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm i fast-xml-parser undici
+          fi
 
-      # ejecuta scripts
-      - run: node scripts/fetch_avisos.js
-      - run: node scripts/fetch_obs.js
+      - name: Crear carpetas dist/
+        run: mkdir -p dist
 
-      # DEBUG: mostrar qué se ha generado en dist/
-      - run: |
-          echo "=== DIST LISTING ==="
-          ls -l dist
-          echo "=== HEAD avisos_diag.json ==="
-          (test -f dist/avisos_diag.json && head -n 50 dist/avisos_diag.json) || echo "avisos_diag.json NO EXISTE"
-          echo "=== HEAD obs_diag.json ==="
-          (test -f dist/obs_diag.json && head -n 50 dist/obs_diag.json) || echo "obs_diag.json NO EXISTE"
+      - name: Construir avisos (Meteoalarm → avisos.geojson)
+        run: node scripts/fetch_avisos.js
 
-      # necesario para que Pages publique también ficheros sin extensión .html
-      - run: mkdir -p dist && touch dist/.nojekyll
-
+      # Si tienes un script para OBS y lo quieres ejecutar, descomenta:
+      # - name: Construir observaciones (obs.geojson) – opcional
+      #   run: node scripts/fetch_obs.js
 
       - name: Descargar y extraer avisos AEMET (tar.gz)
         run: |
-          mkdir -p dist aemet_tmp
-          curl -L "https://www.aemet.es/es/geojson/download/avisos/geojson_1759165200.tar.gz" -o aemet.tar.gz
-          tar -xzf aemet.tar.gz -C aemet_tmp
-          echo "Ficheros descargados:" && find aemet_tmp -type f -name '*.geojson' -maxdepth 2
+          set -e
+          mkdir -p aemet_tmp
+          if curl -fL "https://www.aemet.es/es/geojson/download/avisos/geojson_1759165200.tar.gz" -o aemet.tar.gz; then
+            echo "TAR AEMET descargado"
+            if tar -xzf aemet.tar.gz -C aemet_tmp; then
+              echo "Extraído OK"
+            else
+              echo "WARN: Falló la extracción del TAR AEMET"
+            fi
+          else
+            echo "WARN: No se pudo descargar el TAR AEMET (la URL puede haber cambiado)"
+          fi
 
-      - name: Unir avisos AEMET a un solo GeoJSON
+      - name: Unir avisos AEMET a un solo GeoJSON (o crear placeholder)
         run: |
-          jq -s '{type:"FeatureCollection",features: map(.features) | add}' aemet_tmp/**/*.geojson > dist/avisos_aemet.geojson
-          jq -c . dist/avisos_aemet.geojson > dist/avisos_aemet.min.geojson && mv dist/avisos_aemet.min.geojson dist/avisos_aemet.geojson
-          jq '.features|length as $n | {features:$n, sample:(.[0]|.properties)}' dist/avisos_aemet.geojson > dist/avisos_aemet_diag.json
+          set -e
+          touch dist/.nojekyll
+          found=$(find aemet_tmp -type f -name '*.geojson' | wc -l)
+          if [ "$found" -gt 0 ]; then
+            echo "Encontrados $found GeoJSON(s) de AEMET, uniendo…"
+            jq -s '{type:"FeatureCollection",features: map(.features) | add}' aemet_tmp/**/*.geojson > dist/avisos_aemet.geojson
+            jq -c . dist/avisos_aemet.geojson > dist/avisos_aemet.min.geojson && mv dist/avisos_aemet.min.geojson dist/avisos_aemet.geojson
+          else
+            echo "No se encontraron GeoJSONs de AEMET; publicando placeholder vacío"
+            echo '{"type":"FeatureCollection","features":[]}' > dist/avisos_aemet.geojson
+          fi
+          jq '.features|length as $n | {features:$n}' dist/avisos_aemet.geojson > dist/avisos_aemet_diag.json
 
+      - name: Debug dist/
+        run: |
+          echo "=== LIST dist ==="
+          ls -lh dist || true
+          echo "=== HEAD avisos.geojson ==="
+          head -n 20 dist/avisos.geojson || true
+          echo "=== HEAD avisos_aemet.geojson ==="
+          head -n 20 dist/avisos_aemet.geojson || true
 
-      # subir artefacto a GitHub Pages
-
-      - uses: actions/upload-pages-artifact@v3
+      - name: Upload artifact to Pages
+        uses: actions/upload-pages-artifact@v3
         with:
           path: dist
 
-      # desplegar en Pages
-      - uses: actions/deploy-pages@v4
-
-
-
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
